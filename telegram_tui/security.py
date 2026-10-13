@@ -105,6 +105,11 @@ def resolve_trusted_binary(name: str, *, allow_user_dirs: bool = True) -> str | 
 def safe_subprocess_env() -> dict[str, str]:
     """Environment for child processes with a PATH we control, not inherit."""
     env = dict(os.environ)
+    # An inherited LD_PRELOAD/LD_LIBRARY_PATH would let the dynamic linker
+    # load attacker-supplied code into a "trusted" binary before it runs,
+    # the same class of attack the hardcoded PATH above defends against.
+    env.pop("LD_PRELOAD", None)
+    env.pop("LD_LIBRARY_PATH", None)
     dirs = list(TRUSTED_SYSTEM_DIRS) + [str(d) for d in TRUSTED_USER_DIRS]
     env["PATH"] = os.pathsep.join(dict.fromkeys(dirs))
     return env

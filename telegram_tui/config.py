@@ -20,7 +20,10 @@ DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
 
 
 def load_config() -> tuple[int, str]:
-    load_dotenv(Path.home() / ".config/omagram/.env")
+    env_dir = Path.home() / ".config/omagram"
+    with open_verified_dir(env_dir) as verified:
+        if verified.exists(".env") and not verified.is_symlink(".env"):
+            load_dotenv(env_dir / ".env")
     load_dotenv()
     raw_id = os.environ.get("TG_API_ID", "").strip()
     api_hash = os.environ.get("TG_API_HASH", "").strip()
@@ -59,9 +62,15 @@ def validate_session_path(path: Path) -> Path:
     the session file itself through its own sqlite3 connection by plain
     path, so the fd-anchored guarantee necessarily stops at the directory,
     with the session file itself rejected here if it is already a symlink.
+
+    Telethon's ``SQLiteSession`` appends the ``.session`` suffix unless the
+    given name already ends with it (see ``telethon.sessions.sqlite``), so
+    the file it actually opens is ``path.name + ".session"`` in the common
+    case. Check that real on-disk name, not the bare ``path.name``.
     """
+    session_name = path.name if path.name.endswith(".session") else path.name + ".session"
     with open_verified_dir(path.parent) as verified:
-        if verified.is_symlink(path.name):
+        if verified.is_symlink(session_name):
             raise UnsafePathError(f"refusing to follow symlinked session file: {path}")
     return path
 

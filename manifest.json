@@ -5,16 +5,18 @@
   "version": "0.1.0",
   "author": "Carsten (@goarstne)",
   "license": "MIT",
-  "description": "Keyboard-first Telegram terminal client (TUI) for Omarchy with live theme synchronization.",
+  "description": "Keyboard-first Telegram terminal client (TUI) and Omarchy status bar widget with inline VIP message reading.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Omagram",
-    "description": "Open the Omarchy Telegram terminal client",
+    "description": "Telegram client & VIP message notification widget",
     "category": "Communication",
     "allowMultiple": false,
     "defaultSection": "right"

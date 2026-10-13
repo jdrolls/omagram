@@ -632,6 +632,10 @@ class ComposerInput(Input):
     def on_key(self, event: events.Key) -> None:
         if event.key == "g" and not self.value:
             event.stop()
+            # stop() alone only blocks bubbling to the parent; Input's own
+            # _on_key still runs afterwards and would insert "g" as text.
+            # prevent_default() skips that base-class handler entirely.
+            event.prevent_default()
             self.post_message(self.GifRequested())
 
 
@@ -722,8 +726,11 @@ class SelectableText(Static):
         lines = self._text.splitlines() or [self._text]
         selected_lines = lines[start[0] : finish[0] + 1]
         if selected_lines:
-            selected_lines[0] = selected_lines[0][start[1] :]
-            selected_lines[-1] = selected_lines[-1][: finish[1]]
+            if start[0] == finish[0]:
+                selected_lines = [lines[start[0]][start[1] : finish[1]]]
+            else:
+                selected_lines[0] = selected_lines[0][start[1] :]
+                selected_lines[-1] = selected_lines[-1][: finish[1]]
             selected = "\n".join(selected_lines).strip()
             if selected:
                 self.app._last_copied_selection = selected
@@ -779,6 +786,7 @@ class TelegramTui(App[None]):
         self._rendered_dialog_id: int | None = None
         self._play_worker = None
         self._sending = False
+        self._opening_gif_picker = False
         self._dialogs_lock = asyncio.Lock()
         self._theme_signature: tuple[int, int] | None = None
         self._dialog_tabs: list[DialogTab] = list(getattr(backend, "dialog_tabs", []))
@@ -822,7 +830,7 @@ class TelegramTui(App[None]):
         self.query_one("#messages", MessagePanel).write("[dim]Connecting to Telegram…[/dim]")
         self._theme_signature = self._current_theme_signature()
         self.set_interval(1.0, self._watch_theme)
-        self.run_worker(self._connect(), exclusive=True)
+        self.run_worker(self._connect(), group="connect", exclusive=True)
 
     def _current_theme_signature(self) -> tuple[int, int] | None:
         try:
@@ -843,8 +851,8 @@ class TelegramTui(App[None]):
         self._set_tab_options(self._dialog_tabs)
         if self.selected:
             self._update_chat_title(self.selected)
-            self.run_worker(self._load_messages(self.selected), exclusive=True)
-        self.run_worker(self._reload_dialogs(), exclusive=True)
+            self.run_worker(self._load_messages(self.selected), group="messages", exclusive=True)
+        self.run_worker(self._reload_dialogs(), group="dialogs", exclusive=True)
         self._set_status("Theme updated")
 
     async def _connect(self) -> None:
@@ -965,7 +973,7 @@ class TelegramTui(App[None]):
             return
         self._active_tab = str(event.value)
         self._update_tab_label()
-        self.run_worker(self._reload_dialogs, group="dialog-tab", exclusive=True, exit_on_error=False)
+        self.run_worker(self._reload_dialogs, group="dialogs", exclusive=True, exit_on_error=False)
 
     def _update_tab_label(self) -> None:
         title = next((tab.title for tab in self._dialog_tabs if tab.key == self._active_tab), self._active_tab)
@@ -981,11 +989,13 @@ class TelegramTui(App[None]):
         self._update_tab_label()
         # Setting the hidden Select after updating _active_tab makes its
         # change event a no-op; reload explicitly for keyboard cycling.
-        self.run_worker(self._reload_dialogs, group="dialog-tab", exclusive=True, exit_on_error=False)
+        self.run_worker(self._reload_dialogs, group="dialogs", exclusive=True, exit_on_error=False)
 
     def _copy_to_clipboard(self, text: str) -> None:
         try:
             copier = resolve_trusted_binary("wl-copy")
+            if not copier:
+                raise OSError("wl-copy is not available")
             subprocess.run(
                 [copier, "--trim-newline"],
                 input=text,
@@ -1008,7 +1018,7 @@ class TelegramTui(App[None]):
             if isinstance(item, DialogItem):
                 self.selected = item.dialog
                 self._update_chat_title(self.selected)
-                self.run_worker(self._load_messages(self.selected), exclusive=True)
+                self.run_worker(self._load_messages(self.selected), group="messages", exclusive=True)
         self.query_one("#composer", Input).focus()
 
     async def action_gif(self) -> None:
@@ -1019,21 +1029,31 @@ class TelegramTui(App[None]):
         await self._open_gif_picker()
 
     async def _open_gif_picker(self) -> None:
+        # The screen_stack check alone is a check-then-act race: two calls
+        # triggered close together (e.g. a doubled "g" keypress) can both
+        # see an empty stack before either has pushed GifScreen, stacking
+        # two of them. This flag closes that window synchronously.
+        if self._opening_gif_picker or any(isinstance(screen, GifScreen) for screen in self.screen_stack):
+            return
         if self.selected is None:
             self._set_status("Select a chat before choosing a GIF", error=True)
             return
+        self._opening_gif_picker = True
         try:
-            gifs = await asyncio.wait_for(
-                self.backend.recent_gifs(limit=12, include_previews=True), timeout=8
-            )
-        except Exception as exc:
-            logger.exception("recent GIF load failed")
-            self._set_status(f"GIFs unavailable: {exc}", error=True)
-            return
-        if not gifs:
-            self._set_status("No recent GIFs in Telegram", error=True)
-            return
-        self.push_screen(GifScreen(gifs), self._send_selected_gif)
+            try:
+                gifs = await asyncio.wait_for(
+                    self.backend.recent_gifs(limit=12, include_previews=True), timeout=8
+                )
+            except Exception as exc:
+                logger.exception("recent GIF load failed")
+                self._set_status(f"GIFs unavailable: {exc}", error=True)
+                return
+            if not gifs:
+                self._set_status("No recent GIFs in Telegram", error=True)
+                return
+            self.push_screen(GifScreen(gifs), self._send_selected_gif)
+        finally:
+            self._opening_gif_picker = False
 
     def _send_selected_gif(self, gif: object | None) -> None:
         if gif is None or self.selected is None:
@@ -1080,7 +1100,7 @@ class TelegramTui(App[None]):
             return
         self.selected = event.item.dialog
         self._update_chat_title(self.selected)
-        self.run_worker(self._load_messages(self.selected), exclusive=True)
+        self.run_worker(self._load_messages(self.selected), group="messages", exclusive=True)
 
     async def _load_messages(self, dialog: Dialog) -> None:
         self._chat_generation += 1
@@ -1113,14 +1133,15 @@ class TelegramTui(App[None]):
             ):
                 self.run_worker(
                     self._hydrate_media(dialog, messages, generation),
-                    # Scope exclusivity to this dialog: switching to a
-                    # different chat must not cancel another chat's in-flight
-                    # GIF/photo downloads. A shared group name previously
-                    # meant every chat switch killed whatever preview was
-                    # downloading, so slow media (esp. GIF thumbnails) never
-                    # got the chance to finish and be cached.
-                    group=f"media-previews-{dialog.id}",
-                    exclusive=True,
+                    # Unique per (dialog, generation): a hydration pass must
+                    # never be cancelled by a later reload of the SAME
+                    # dialog either -- a busy chat reloads on every new
+                    # message (see _after_send/_refresh_live_message), and
+                    # a shared group previously meant each of those cancelled
+                    # whatever GIF/photo preview the last one was still
+                    # downloading, so slow media never got the chance to
+                    # finish and be cached before the next reload killed it.
+                    group=f"media-previews-{dialog.id}-{generation}",
                     exit_on_error=False,
                 )
         except Exception as exc:
@@ -1435,7 +1456,10 @@ class TelegramTui(App[None]):
         urls = []
         for match in URL_RE.finditer(text):
             url = match.group(0)
-            while url and url[-1] in ".,!?;:)":
+            while url and (
+                url[-1] in ".,!?;:"
+                or (url[-1] == ")" and url.count("(") < url.count(")"))
+            ):
                 url = url[:-1]
             if url:
                 urls.append(url)
@@ -1450,7 +1474,10 @@ class TelegramTui(App[None]):
             result.append(escape(text[cursor:match.start()]))
             url = match.group(0)
             trailing = ""
-            while url and url[-1] in ".,!?;:)":
+            while url and (
+                url[-1] in ".,!?;:"
+                or (url[-1] == ")" and url.count("(") < url.count(")"))
+            ):
                 trailing = url[-1] + trailing
                 url = url[:-1]
             if url:

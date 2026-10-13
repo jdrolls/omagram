@@ -22,5 +22,18 @@ class MediaProbe(App):
 
 
 if __name__ == "__main__":
+    # Validate before entering Textual's run loop: App.run() swallows an
+    # exception raised from compose() and still exits 0, so a bad path
+    # or missing argument would otherwise print a traceback yet look
+    # like success to any script checking the exit code.
+    if len(sys.argv) != 2:
+        print("usage: python -m telegram_tui.media_probe IMAGE", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with Image.open(sys.argv[1]):
+            pass
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
     cache_cell_geometry()
     MediaProbe().run()

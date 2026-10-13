@@ -95,6 +95,19 @@ class SafeSubprocessEnvTests(unittest.TestCase):
         self.assertIn("/usr/bin", env["PATH"])
         self.assertEqual(env["SOME_VAR"], "kept")
 
+    def test_strips_dynamic_linker_env_vars(self):
+        # An inherited LD_PRELOAD/LD_LIBRARY_PATH would let the dynamic
+        # linker load attacker code into a "trusted" binary before it
+        # runs -- the same class of attack the hardcoded PATH defends
+        # against, so these must not pass through.
+        with patch.dict(
+            os.environ,
+            {"LD_PRELOAD": "/tmp/evil.so", "LD_LIBRARY_PATH": "/tmp/evil-libs"},
+        ):
+            env = safe_subprocess_env()
+        self.assertNotIn("LD_PRELOAD", env)
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+
 
 class SecureStateDirTests(unittest.TestCase):
     def test_creates_private_directory(self):

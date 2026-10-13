@@ -15,10 +15,10 @@
 
 [![Omarchy App](https://raw.githubusercontent.com/tcballard/omarchy-badges/main/badges/v1/omarchy-app.svg)](https://github.com/tcballard/omarchy-badges)
 
-> **OMAGRAM** — A fast, theme-aware, keyboard-first Telegram terminal client (TUI) for Linux & Omarchy with native Sixel/Halfcell raster graphics and instant QR-code authentication.
+> **OMAGRAM** — A fast, theme-aware, keyboard-first Telegram terminal client (TUI) and native Omarchy status bar widget with inline VIP message reading, Sixel/Halfcell raster graphics, and instant QR-code authentication.
 
 <p align="center">
-  <img src="screenshots/release-0.1.png" alt="omagram Terminal Screenshot" width="100%">
+  <img src="screenshots/chat-view.png" alt="omagram Terminal Screenshot" width="100%">
 </p>
 
 ---
@@ -27,6 +27,7 @@
 
 - 🎨 **Dynamic Theme Engine:** 100% theme-aware; seamlessly synchronizes with your active Omarchy desktop color palette (`colors.toml`) and terminal theme in real time.
 - ⌨️ **Vim-Style Navigation:** Seamless keyboard workflow (`j`/`k` scroll, `Enter` open, `c` compose, `v` media, `Esc` back).
+- 🎛️ **Native Omarchy Bar Widget:** Status bar badges for chosen VIP contacts showing colored initials (`R`, `A`). Click any initial to read incoming messages inline, mark them as read, or open the full chat in Omagram!
 - 🖼️ **Native Terminal Graphics:** True pixel image and animation rendering with automatic Unicode Halfcell fallback.
 - 🔒 **Instant QR Login:** Scan once with your Telegram mobile app — direct MTProto session, zero third-party servers.
 
@@ -122,7 +123,24 @@ uv run omagram
 
 ## 🎛️ Omarchy Bar Widget Integration
 
-Omagram includes a native launcher widget for the Omarchy status bar.
+Omagram ships a native Quickshell status bar plugin for Omarchy with live VIP contact notifications and inline message reading.
+
+<p align="center">
+  <img src="screenshots/bar-widget-messages.png" alt="Omagram Bar Widget - Inline VIP Message Reading" width="100%">
+</p>
+
+### ✨ Bar Widget Features
+
+- **VIP Direct Message Alerts:** Select contacts whose direct messages matter to you.
+- **Color-Coded Initials in Status Bar:** When a VIP writes, their initial appears in your bar (e.g. `R` for Rae, `A` for Ada, `RA` for both). Each contact receives a distinctive, persistent color.
+- **Click to Read Inline:** Click any letter badge in the status bar to open the popup card and read unread messages right in the bar widget—without switching away from your current window!
+- **Quick Actions:** Mark messages as read directly in the popup, or click **"In Omagram öffnen"** to jump into the full terminal chat.
+- **Multi-VIP Switcher:** When multiple VIPs write, easily switch between their messages via contact chips in the header.
+- **Fallback Launcher:** When no VIP messages are unread, the widget displays the clean Telegram icon (`󰗊`). Left-click opens the VIP contact selector, right-click launches Omagram.
+
+<p align="center">
+  <img src="screenshots/bar-widget-contacts.png" alt="Omagram Bar Widget - VIP Contact Selector" width="100%">
+</p>
 
 ### Install via Omarchy CLI
 ```bash
@@ -141,8 +159,6 @@ omarchy plugin validate ~/.config/omarchy/plugins/goarstne.omagram
 omarchy-shell shell rescanPlugins
 omarchy plugin enable goarstne.omagram
 ```
-
-Clicking the Telegram status icon (`󰗊`) in your Omarchy bar spawns Omagram directly inside your terminal workspace.
 
 ### Omarchy menu (Super+Space)
 

@@ -38,6 +38,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 load_config()
 
+    def test_never_reads_a_symlinked_env_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            config_dir = Path(home) / ".config/omagram"
+            config_dir.mkdir(parents=True, mode=0o700)
+            real_target = Path(home) / "elsewhere.env"
+            real_target.write_text("TG_API_ID=999\nTG_API_HASH=evil\n")
+            (config_dir / ".env").symlink_to(real_target)
+            with patch("pathlib.Path.home", return_value=Path(home)), \
+                 patch("telegram_tui.config.load_dotenv") as load_dotenv_mock, \
+                 patch.dict(os.environ, {"TG_API_ID": "", "TG_API_HASH": ""}, clear=False):
+                load_config()
+            called_paths = [call.args[0] for call in load_dotenv_mock.call_args_list if call.args]
+            self.assertNotIn(config_dir / ".env", called_paths)
+
 
 class SaveConfigTests(unittest.TestCase):
     def test_writes_env_file_atomically_with_private_permissions(self):
@@ -80,13 +94,38 @@ class ValidateSessionPathTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(session_path.parent.stat().st_mode), 0o700)
 
     def test_rejects_symlinked_session_file(self):
+        # Telethon's SQLiteSession appends ".session" to a session id that
+        # doesn't already end with it, so the file it actually opens for
+        # SESSION_PATH="telegram" is "telegram.session", not "telegram".
         with tempfile.TemporaryDirectory() as base:
             real_session = Path(base) / "real.session"
             real_session.write_text("session-data")
-            link = Path(base) / "telegram"
-            link.symlink_to(real_session)
+            session_path = Path(base) / "telegram"
+            (Path(base) / "telegram.session").symlink_to(real_session)
             with self.assertRaises(UnsafePathError):
-                validate_session_path(link)
+                validate_session_path(session_path)
+
+    def test_rejects_symlinked_session_file_with_explicit_suffix(self):
+        # A TG_SESSION override that already ends in ".session" is used
+        # by Telethon as-is, with no suffix appended.
+        with tempfile.TemporaryDirectory() as base:
+            real_session = Path(base) / "real.session"
+            real_session.write_text("session-data")
+            session_path = Path(base) / "telegram.session"
+            session_path.symlink_to(real_session)
+            with self.assertRaises(UnsafePathError):
+                validate_session_path(session_path)
+
+    def test_ignores_symlink_at_bare_name_when_suffixed_file_is_safe(self):
+        # A symlink at the bare "telegram" name (never opened by Telethon)
+        # must not block a legitimate "telegram.session" file.
+        with tempfile.TemporaryDirectory() as base:
+            elsewhere = Path(base) / "elsewhere.txt"
+            elsewhere.write_text("unrelated")
+            session_path = Path(base) / "telegram"
+            session_path.symlink_to(elsewhere)
+            (Path(base) / "telegram.session").write_text("session-data")
+            self.assertEqual(validate_session_path(session_path), session_path)
 
 
 if __name__ == "__main__":

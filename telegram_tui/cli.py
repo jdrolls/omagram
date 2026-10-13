@@ -7,7 +7,12 @@ import logging
 import sys
 
 import qrcode
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import (
+    PasswordHashInvalidError,
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    SessionPasswordNeededError,
+)
 
 from .app import TelegramTui
 from .client import TelegramBackend
@@ -70,8 +75,13 @@ async def perform_interactive_login(backend: TelegramBackend) -> None:
             qr_login = await qr_login.recreate()
         except SessionPasswordNeededError:
             logger.info("2fa password requested")
-            password = getpass.getpass("2FA Password: ")
-            await backend.client.sign_in(password=password)
+            while True:
+                password = getpass.getpass("2FA Password: ")
+                try:
+                    await backend.client.sign_in(password=password)
+                    break
+                except PasswordHashInvalidError:
+                    print("Incorrect password, try again.")
             logger.info("2fa sign-in completed")
             break
         except Exception:
@@ -83,9 +93,17 @@ async def perform_interactive_login(backend: TelegramBackend) -> None:
             phone = input("Phone number (+1... / +49...): ").strip()
             logger.info("phone-code login requested")
             await backend.send_code(phone)
-            code = input("Telegram code: ").strip()
-            password = getpass.getpass("2FA Password (empty if none): ") or None
-            await backend.sign_in(phone, code, password)
+            while True:
+                code = input("Telegram code: ").strip()
+                password = getpass.getpass("2FA Password (empty if none): ") or None
+                try:
+                    await backend.sign_in(phone, code, password)
+                    break
+                except PasswordHashInvalidError:
+                    print("Incorrect 2FA password, try again.")
+                except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+                    print("Incorrect or expired code; sending a new one.")
+                    await backend.send_code(phone)
             logger.info("phone-code login completed")
             break
     print(f"\nAuthenticated. Session saved to {SESSION_PATH}")
@@ -98,7 +116,7 @@ async def authenticate(api_id: int, api_hash: str) -> None:
     backend = TelegramBackend(api_id, api_hash, str(SESSION_PATH))
     try:
         logger.info("auth connecting")
-        await backend.connect()
+        await asyncio.wait_for(backend.connect(), timeout=20)
         authorized = await backend.authorized()
         logger.info("auth connected authorized=%s", authorized)
         if authorized:

@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/bin:/bin
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "$DIR/.venv/bin/python" -u "$DIR/backend.py" --omagram "$DIR"

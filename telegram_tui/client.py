@@ -90,7 +90,7 @@ class RecentGif:
 
 
 YOUTUBE_RE = re.compile(
-    r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)[\w-]+|youtu\.be/[\w-]+)(?:\S*)?",
+    r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?(?:[^\s#&]*&)*v=|shorts/)[\w-]+|youtu\.be/[\w-]+)(?:\S*)?",
     re.IGNORECASE,
 )
 YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/)([\w-]{6,})", re.IGNORECASE)
@@ -522,6 +522,13 @@ class TelegramBackend:
             and target.is_file(name) and target.size(name) > 0
         ]
 
+    @staticmethod
+    def _cleanup_orphaned_temps(target: VerifiedDir, *prefixes: str) -> None:
+        """Remove leftover temporary files matching any of the given prefixes."""
+        for name in target.list_names():
+            if any(name.startswith(prefix) for prefix in prefixes):
+                target.remove(name)
+
     async def _cache_media(self, dialog_id: int, item: object) -> Path | None:
         # ponytail: serialize full downloads; use per-message locks if parallel playback is needed.
         async with self._media_download_lock:
@@ -564,7 +571,7 @@ class TelegramBackend:
             if has_existing:
                 logger.warning("invalid media cache removed dialog_id=%s message_id=%s path=%s", dialog_id, message_id, target.path / requested_name)
                 target.remove(requested_name)
-            target.remove(temp_name)
+            self._cleanup_orphaned_temps(target, f".{message_id}.tmp-")
             try:
                 logger.info("media download started dialog_id=%s message_id=%s kind=%s", dialog_id, message_id, media_kind)
                 # Telethon manages this file itself via its own path-based
@@ -613,7 +620,8 @@ class TelegramBackend:
         return await self._cache_media(dialog_id, item)
 
     async def _cache_media_thumbnail(self, dialog_id: int, item: object) -> Path | None:
-        if self._media_kind(item) == "gif":
+        media_kind = self._media_kind(item)
+        if media_kind == "gif":
             return await self._cache_gif_thumbnail(dialog_id, item)
         started = time.perf_counter()
         message_id = getattr(item, "id", None)
@@ -621,11 +629,9 @@ class TelegramBackend:
             return None
         with self.media_cache.subpath(str(dialog_id), "thumbs") as target:
             requested_name = f"{message_id}.jpg"
-            temp_stem = f".{message_id}.tmp-{uuid.uuid4().hex}"
-            temp_name = f"{temp_stem}.jpg"
-            temp_name_mp4 = f"{temp_stem}.mp4"
+            temp_name = f".{message_id}.tmp-{uuid.uuid4().hex}.jpg"
             has_existing = target.is_file(requested_name)
-            is_video = self._media_kind(item) == "video"
+            is_video = media_kind == "video"
             valid_existing = (
                 self._usable_gif_image(target, requested_name)
                 if is_video and has_existing
@@ -640,9 +646,13 @@ class TelegramBackend:
             if has_existing:
                 logger.warning("invalid thumbnail cache removed dialog_id=%s message_id=%s path=%s", dialog_id, message_id, target.path / requested_name)
                 target.remove(requested_name)
-            target.remove(temp_name)
+            self._cleanup_orphaned_temps(target, f".{message_id}.tmp-")
+            thumb: object | int = self._static_gif_thumb(item) if is_video else -1
+            if is_video and thumb is None:
+                logger.info("video has no static thumbnail dialog_id=%s message_id=%s", dialog_id, message_id)
+                return None
             try:
-                logger.info("thumbnail download started dialog_id=%s message_id=%s kind=%s", dialog_id, message_id, self._media_kind(item))
+                logger.info("thumbnail download started dialog_id=%s message_id=%s kind=%s", dialog_id, message_id, media_kind)
                 # See _cache_media(): Telethon writes this file itself via a
                 # plain path, so the fd-anchored guarantee resumes right
                 # after -- the validity check and publish-via-rename below
@@ -651,7 +661,7 @@ class TelegramBackend:
                     self.client.download_media(
                         item,
                         file=str(target.path / temp_name),
-                        thumb=-1,
+                        thumb=thumb,
                         progress_callback=self._size_guard(MAX_THUMBNAIL_BYTES),
                     ),
                     timeout=25,
@@ -682,7 +692,6 @@ class TelegramBackend:
                 return None
             finally:
                 target.remove(temp_name)
-                target.remove(temp_name_mp4)
 
     @staticmethod
     def _static_gif_thumb(item: object) -> object | None:
@@ -695,7 +704,7 @@ class TelegramBackend:
         video bytes instead of a thumbnail. Selecting explicitly from the
         static families avoids that entirely.
         """
-        document = getattr(item, "document", item)
+        document = getattr(item, "document", None) or getattr(item, "video", None) or item
         thumbs = getattr(document, "thumbs", None) or []
         static = [
             thumb for thumb in thumbs
@@ -745,7 +754,7 @@ class TelegramBackend:
             target.remove(output_name)
 
             # Never let an old interrupted transfer become the next render source.
-            target.remove(fallback_name)
+            self._cleanup_orphaned_temps(target, f".{message_id}.tmp-", f".{message_id}.fallback-")
 
             # Telegram's embedded GIF thumbnail is cheap when a static photo
             # size exists. If it does not, skip ``thumb=-1``: that value can
@@ -901,6 +910,7 @@ class TelegramBackend:
                 path = target.path / name
                 logger.debug("youtube thumbnail cache hit video_id=%s path=%s", video_id, path)
                 return path
+            self._cleanup_orphaned_temps(target, f".{name}.tmp-")
             temp_name = f".{name}.tmp-{uuid.uuid4().hex}"
 
             thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
