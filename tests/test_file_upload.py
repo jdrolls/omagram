@@ -41,7 +41,7 @@ class FileUploadTests(unittest.IsolatedAsyncioTestCase):
         gif = object()
         await backend.send_gif(dialog, gif)
         backend.client.send_file.assert_awaited_once_with(
-            dialog.entity, gif, caption="", parse_mode=None,
+            dialog.entity, gif, reply_to=None, caption="", parse_mode=None,
             force_document=False, nosound_video=False,
         )
 

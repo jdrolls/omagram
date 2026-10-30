@@ -57,6 +57,18 @@ class Dialog:
     is_contact: bool = False
     is_archived: bool = False
     is_muted: bool = False
+    # Bots with threaded mode split their private chat into forum topics.
+    # A Dialog scoped to one topic carries its id; loads and sends use it.
+    has_topics: bool = False
+    topic_id: int | None = None
+    topic_title: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ForumTopic:
+    id: int
+    title: str
+    unread: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -262,6 +274,7 @@ class TelegramBackend:
                     is_contact=bool(getattr(dialog.entity, "contact", False)),
                     is_archived=bool(getattr(dialog, "archived", False)),
                     is_muted=self._dialog_is_muted(dialog),
+                    has_topics=bool(getattr(dialog.entity, "bot_forum_view", False)),
                 )
                 async for dialog in self.client.iter_dialogs(limit=limit)
                 if dialog.is_user or dialog.is_group or dialog.is_channel
@@ -329,7 +342,7 @@ class TelegramBackend:
         # Telethon returns newest messages first. Reverse the bounded result so
         # the reader renders the selected window in chronological order.
         try:
-            items = await self.client.get_messages(dialog.entity, limit=limit)
+            items = await self.client.get_messages(dialog.entity, limit=limit, reply_to=dialog.topic_id)
         except Exception:
             logger.exception("message load request failed dialog_id=%s elapsed=%.3fs", dialog.id, time.perf_counter() - started)
             raise
@@ -967,7 +980,30 @@ class TelegramBackend:
             return result
 
     async def send_message(self, dialog: Dialog, text: str) -> None:
-        await self.client.send_message(dialog.entity, text)
+        await self.client.send_message(dialog.entity, text, reply_to=dialog.topic_id)
+
+    async def topics(self, dialog: Dialog, limit: int = 100) -> list[ForumTopic]:
+        """Return the forum topics (threads) of a bot chat in threaded mode."""
+        result = await self.client(functions.messages.GetForumTopicsRequest(
+            peer=dialog.entity, offset_date=None, offset_id=0, offset_topic=0, limit=limit,
+        ))
+        return [
+            ForumTopic(topic.id, topic.title, topic.unread_count)
+            for topic in getattr(result, "topics", [])
+            if isinstance(topic, types.ForumTopic)
+        ]
+
+    async def create_topic(self, dialog: Dialog, title: str) -> ForumTopic:
+        title = title.strip()
+        if not title:
+            raise ValueError("Thread title must not be empty")
+        result = await self.client(functions.messages.CreateForumTopicRequest(peer=dialog.entity, title=title))
+        # The topic id is the id of the service message that created it.
+        for update in getattr(result, "updates", []):
+            message = getattr(update, "message", None)
+            if isinstance(getattr(message, "action", None), types.MessageActionTopicCreate):
+                return ForumTopic(message.id, title)
+        raise RuntimeError("Telegram did not return the new thread")
 
     async def recent_gifs(self, limit: int = 24, include_previews: bool = False) -> list[object]:
         """Return Telegram's native recently used/saved GIF documents."""
@@ -1002,6 +1038,7 @@ class TelegramBackend:
         await self.client.send_file(
             dialog.entity,
             gif,
+            reply_to=dialog.topic_id,
             caption=caption,
             parse_mode=None,
             force_document=False,
@@ -1034,7 +1071,7 @@ class TelegramBackend:
                 attributes.append(types.DocumentAttributeAnimated())
                 send_kwargs["mime_type"] = "image/gif"
             await self.client.send_file(
-                dialog.entity, handle, file_size=info.st_size,
+                dialog.entity, handle, file_size=info.st_size, reply_to=dialog.topic_id,
                 caption=caption, parse_mode=None, force_document=not is_gif,
                 attributes=attributes,
                 progress_callback=progress_callback,

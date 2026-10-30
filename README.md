@@ -63,6 +63,7 @@ uv run omagram
 | `g` | Open recent GIFs and send the selected one |
 | `p` | Play the newest video or GIF in the current chat with `mpv` |
 | `s` | Send a local file to the current chat |
+| `h` | Pick a thread in bots that use threaded mode (`n` in the picker creates one) |
 | `t` | Cycle Chats, Private, Groups and your Telegram folders |
 | `b` / `Ctrl+b` | Toggle chat sidebar |
 | `r` | Reload chats and messages |

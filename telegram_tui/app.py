@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import re
@@ -26,7 +27,7 @@ from textual_image._terminal import CellSize, get_cell_size
 # Unicode is the fallback; Foot uses native Sixel widgets below.
 
 from . import __version__
-from .client import Dialog, DialogTab, Message, RecentGif, TelegramBackend
+from .client import Dialog, DialogTab, ForumTopic, Message, RecentGif, TelegramBackend
 from textual_image.widget import HalfcellImage as TerminalImage, TGPImage
 from telethon.tl import types
 
@@ -604,6 +605,76 @@ class GifScreen(ModalScreen[object | None]):
         self.dismiss(None)
 
 
+# Picker entry for the unthreaded view: every message, sends go to General.
+ALL_MESSAGES = ForumTopic(0, "All messages")
+
+
+class TopicScreen(ModalScreen[ForumTopic | None]):
+    """Thread picker for bots that run their private chat in threaded mode."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True),
+        Binding("n", "new_topic", "New thread"),
+    ]
+    DEFAULT_CSS = UploadScreen.DEFAULT_CSS + """
+    TopicScreen { align: center middle; background: $om-darker_background 80%; }
+    #topic-options { height: auto; max-height: 14; }
+    """
+
+    def __init__(self, backend: TelegramBackend, dialog: Dialog, topics: list[ForumTopic]):
+        super().__init__()
+        self.backend = backend
+        self.dialog = dialog
+        self.topics = [ALL_MESSAGES, *topics]
+
+    @staticmethod
+    def _label(topic: ForumTopic) -> str:
+        return f"{topic.title}  [{topic.unread}]" if topic.unread else topic.title
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="media-card"):
+            yield Static(f"Threads · {self.dialog.title}", markup=False)
+            yield Label("Enter to open · n new thread · Esc to cancel")
+            yield ListView(
+                *(ListItem(Label(self._label(topic), markup=False)) for topic in self.topics),
+                id="topic-options",
+            )
+            yield Input(placeholder="New thread title, Enter to create", id="topic-new")
+            yield Static("", id="topic-status", markup=False)
+
+    def on_mount(self) -> None:
+        options = self.query_one("#topic-options", ListView)
+        current = next((i for i, t in enumerate(self.topics) if t.id == (self.dialog.topic_id or 0)), 0)
+        options.index = current
+        options.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        event.stop()
+        if event.list_view.index is not None:
+            self.dismiss(self.topics[event.list_view.index])
+
+    def action_new_topic(self) -> None:
+        self.query_one("#topic-new", Input).focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        title = event.value.strip()
+        if not title:
+            return
+        event.input.disabled = True
+        self.query_one("#topic-status", Static).update("Creating thread…")
+        try:
+            topic = await self.backend.create_topic(self.dialog, title)
+        except Exception as exc:
+            event.input.disabled = False
+            self.query_one("#topic-status", Static).update(f"Could not create thread: {exc}")
+            return
+        self.dismiss(topic)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class GifListItem(ListItem):
     def __init__(self, gif: object, label: str):
         super().__init__()
@@ -768,6 +839,7 @@ class TelegramTui(App[None]):
         Binding("p", "play_media", "Play", show=True),
         Binding("v", "choose_media", "Media", show=True),
         Binding("s", "upload", "Send", show=True),
+        Binding("h", "topics", "Threads", show=True),
         Binding("t", "cycle_tab", "Next tab", show=True),
         Binding("b", "toggle_sidebar", "Sidebar", show=True),
         Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False),
@@ -1016,9 +1088,48 @@ class TelegramTui(App[None]):
         if self.selected is None:
             item = self.query_one("#dialogs", ChatListView).highlighted_child
             if isinstance(item, DialogItem):
-                self.selected = item.dialog
-                self._update_chat_title(self.selected)
-                self.run_worker(self._load_messages(self.selected), group="messages", exclusive=True)
+                self._open_dialog(item.dialog)
+        self.query_one("#composer", Input).focus()
+
+    def _open_dialog(self, dialog: Dialog) -> None:
+        self.selected = dialog
+        self._update_chat_title(dialog)
+        self.run_worker(self._load_messages(dialog), group="messages", exclusive=True)
+        if dialog.has_topics:
+            self.run_worker(self._open_topic_picker(), group="topics", exclusive=True, exit_on_error=False)
+
+    def action_topics(self) -> None:
+        if not self.selected or not self.selected.has_topics:
+            self._set_status("This chat has no threads", error=True)
+            return
+        self.run_worker(self._open_topic_picker(), group="topics", exclusive=True, exit_on_error=False)
+
+    async def _open_topic_picker(self) -> None:
+        if any(isinstance(screen, TopicScreen) for screen in self.screen_stack):
+            return
+        dialog = self.selected
+        if dialog is None:
+            return
+        try:
+            topics = await self.backend.topics(dialog)
+        except Exception as exc:
+            self._set_status(f"Could not load threads: {exc}", error=True)
+            return
+        if self.selected is not dialog:
+            return
+        self.push_screen(TopicScreen(self.backend, dialog, topics), self._choose_topic)
+
+    def _choose_topic(self, topic: ForumTopic | None) -> None:
+        if topic is None or self.selected is None:
+            return
+        threaded = topic.id != ALL_MESSAGES.id
+        self.selected = dataclasses.replace(
+            self.selected,
+            topic_id=topic.id if threaded else None,
+            topic_title=topic.title if threaded else None,
+        )
+        self._update_chat_title(self.selected)
+        self.run_worker(self._load_messages(self.selected), group="messages", exclusive=True)
         self.query_one("#composer", Input).focus()
 
     async def action_gif(self) -> None:
@@ -1084,6 +1195,8 @@ class TelegramTui(App[None]):
 
     def _update_chat_title(self, dialog: Dialog) -> None:
         title = escape(dialog.title)
+        if dialog.topic_title:
+            title += f" › {escape(dialog.topic_title)}"
         badge = (
             f"  [bold {self.palette['accent']}][{dialog.unread} unread][/]"
             if dialog.unread
@@ -1098,9 +1211,7 @@ class TelegramTui(App[None]):
             return
         if not isinstance(event.item, DialogItem):
             return
-        self.selected = event.item.dialog
-        self._update_chat_title(self.selected)
-        self.run_worker(self._load_messages(self.selected), group="messages", exclusive=True)
+        self._open_dialog(event.item.dialog)
 
     async def _load_messages(self, dialog: Dialog) -> None:
         self._chat_generation += 1
